@@ -1,0 +1,5 @@
+PySide6
+argostranslate
+mss
+pytesseract
+Pillow
