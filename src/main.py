@@ -697,7 +697,7 @@ class HotkeyDialog(QDialog):
 
 class ScreenSelector(QWidget):
 
-    def __init__(self, screenshot, callback):
+    def __init__(self, screenshot, callback, geometry=None):
         super().__init__()
 
         self.screenshot = screenshot
@@ -705,15 +705,23 @@ class ScreenSelector(QWidget):
         self.start_pos = None
         self.end_pos = None
 
+        # The screenshot is in physical pixels, Qt windows are in logical (scaled) pixels.
+        # With Windows display scaling (125%, 150%...) they differ, so the ratio is needed
+        # to show the picture at the right size and to map the selection back to pixels.
+        geometry = geometry or QRect(0, 0, screenshot.width, screenshot.height)
+        self.origin = geometry.topLeft()
+        self.scale = screenshot.width / max(geometry.width(), 1)
+
         image = screenshot.convert("RGBA")
         self._data = image.tobytes("raw", "RGBA")
         self.qimage = QImage(
             self._data, image.width, image.height, QImage.Format_RGBA8888
         )
+        self.qimage.setDevicePixelRatio(self.scale)
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setCursor(QCursor(Qt.CrossCursor))
-        self.setGeometry(0, 0, screenshot.width, screenshot.height)
+        self.setGeometry(geometry)
 
         self.show()
         self.activateWindow()
@@ -727,7 +735,11 @@ class ScreenSelector(QWidget):
 
         if self.start_pos and self.end_pos:
             rect = QRect(self.start_pos, self.end_pos).normalized()
-            painter.drawImage(rect, self.qimage, rect)
+            source = QRect(
+                round(rect.x() * self.scale), round(rect.y() * self.scale),
+                round(rect.width() * self.scale), round(rect.height() * self.scale),
+            )
+            painter.drawImage(rect, self.qimage, source)
             painter.setPen(QPen(QColor(COLORS["accent"]), 2))
             painter.drawRoundedRect(rect, 3, 3)
         else:
@@ -764,7 +776,7 @@ class ScreenSelector(QWidget):
         self.close()
 
         if rect.width() > 5 and rect.height() > 5:
-            self.callback(rect, self.screenshot)
+            self.callback(rect, self.screenshot, self.scale, self.origin)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
@@ -1703,15 +1715,22 @@ class MainWindow(QWidget):
         self.hide()
         QApplication.processEvents()
 
+        screen = QApplication.primaryScreen()
+        geometry = screen.geometry() if screen else None
+
         with mss.mss() as sct:
             data = sct.grab(sct.monitors[1])
             screenshot = Image.frombytes("RGB", data.size, data.rgb)
 
-        self.selector = ScreenSelector(screenshot, self.process_selection)
+        self.selector = ScreenSelector(screenshot, self.process_selection, geometry)
         self.selector.show()
 
-    def process_selection(self, rect, screenshot):
-        crop = screenshot.crop((rect.left(), rect.top(), rect.right(), rect.bottom()))
+    def process_selection(self, rect, screenshot, scale=1.0, origin=None):
+        # rect is in logical pixels; the screenshot is in physical pixels
+        crop = screenshot.crop((
+            round(rect.left() * scale), round(rect.top() * scale),
+            round((rect.right() + 1) * scale), round((rect.bottom() + 1) * scale),
+        ))
         crop = crop.resize((crop.width * 3, crop.height * 3), Image.Resampling.LANCZOS)
         crop = ImageEnhance.Contrast(crop).enhance(1.35)
         crop = crop.filter(ImageFilter.SHARPEN)
@@ -1738,7 +1757,8 @@ class MainWindow(QWidget):
         self.refresh_dictionary()
 
         self.result_window = ResultWindow(
-            self, text, translation, QPoint(rect.left(), rect.bottom()), text
+            self, text, translation,
+            QPoint(rect.left(), rect.bottom()) + (origin or QPoint(0, 0)), text
         )
 
     # ========================================================
